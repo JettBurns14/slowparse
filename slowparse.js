@@ -1,4 +1,4 @@
-(function(f){if(typeof exports==="object"&&typeof module!=="undefined"){module.exports=f()}else if(typeof define==="function"&&define.amd){define([],f)}else{var g;if(typeof window!=="undefined"){g=window}else if(typeof global!=="undefined"){g=global}else if(typeof self!=="undefined"){g=self}else{g=this}g.Slowparse = f()}})(function(){var define,module,exports;return (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
+(function(f){if(typeof exports==="object"&&typeof module!=="undefined"){module.exports=f()}else if(typeof define==="function"&&define.amd){define([],f)}else{var g;if(typeof window!=="undefined"){g=window}else if(typeof global!=="undefined"){g=global}else if(typeof self!=="undefined"){g=self}else{g=this}g.Slowparse = f()}})(function(){var define,module,exports;return (function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;if(!f&&c)return c(i,!0);if(u)return u(i,!0);var a=new Error("Cannot find module '"+i+"'");throw a.code="MODULE_NOT_FOUND",a}var p=n[i]={exports:{}};e[i][0].call(p.exports,function(r){var n=e[i][1][r];return o(n||r)},p,p.exports,r,e,n,t)}return n[i].exports}for(var u="function"==typeof require&&require,i=0;i<t.length;i++)o(t[i]);return o}return r})()({1:[function(require,module,exports){
 // ### CSS Parsing
 //
 // `CSSParser` is our internal CSS token stream parser object. This object
@@ -89,6 +89,7 @@ module.exports = (function(){
       "text-wrap","top","transform","transform-origin","transform-style",
       "transition","transition-delay","transition-duration",
       "transition-property","transition-timing-function","unicode-bidi",
+      "user-select",
       "vertical-align","visibility","voice-balance","voice-duration",
       "voice-family","voice-pitch","voice-pitch-range","voice-rate",
       "voice-stress","voice-volume","volume","white-space","widows","width",
@@ -445,8 +446,13 @@ module.exports = (function(){
       if (next === ':') {
         // Before we continue, we must make sure the string we found is a real
         // CSS property.
-        if (!( property && property.match(/^[a-z\-]+$/)) || !this._knownCSSProperty(property)) {
-          throw new ParseError("INVALID_CSS_PROPERTY_NAME", this, propertyStart, propertyEnd, property);
+        var isValidName = property && property.match(/^[a-z\-]+$/);
+        if (!isValidName) {
+          throw new ParseError("INVALID_CSS_PROPERTY_NAME",
+              this, propertyStart, propertyEnd, property);
+        } else if (!this._knownCSSProperty(property)) {
+          this.warnings.push(new ParseError("UNKNOWN_CSS_PROPERTY_NAME",
+              this, propertyStart, propertyEnd, property));
         }
         this.stream.markTokenStartAfterSpace();
         this._parseValue(selector, selectorStart, property, propertyStart);
@@ -489,6 +495,17 @@ module.exports = (function(){
         throw new ParseError("MISSING_CSS_VALUE", this, this.stream.pos-1, this.stream.pos);
       }
 
+      // If value has a newline, the tokenizer ate the next pair, so we're missing a ;
+      if (value.indexOf('\n') > -1) {
+        value = value.substr(0, value.indexOf('\n'));
+        this.warnings.push(new ParseError("UNFINISHED_CSS_VALUE", this, valueStart, valueEnd, value));
+      }
+
+      // if value matches this regex, then there's a space between
+      if (value.match(/(#|rgb|rgba|hsl|hsla)\s+\(/)) {
+        this.warnings.push(new ParseError("IMPROPER_CSS_VALUE", this, valueStart, valueEnd, value));
+      }
+
       // At this point we can fill in the *value* part of the current
       // `property: value;` pair. However, we hold off binding it until
       // we are sure there are no parse errors.
@@ -520,6 +537,7 @@ module.exports = (function(){
       }
       else if (next === '}') {
         // This is block level termination; try to read a new selector.
+        this.warnings.push(new ParseError("UNFINISHED_CSS_VALUE", this, valueStart, valueEnd, value));
         this.currentRule.declarations.end = this.stream.pos;
         this._bindCurrentRule();
         this.stream.markTokenStartAfterSpace();
@@ -556,11 +574,17 @@ module.exports = (function(){
 
   var DocumentFragment = require("./DocumentFragment");
 
-  function DOMBuilder(disallowActiveAttributes) {
+  function DOMBuilder(sourceCode, disallowActiveAttributes, scriptPreprocessor) {
+    this.disallowActiveAttributes = disallowActiveAttributes;
+    this.scriptPreprocessor = scriptPreprocessor;
+    this.sourceCode = sourceCode;
+    this.code = "";
     this.fragment = new DocumentFragment();
     this.currentNode = this.fragment.node;
     this.contexts = [];
-    this.disallowActiveAttributes = disallowActiveAttributes;
+    this.rules = [];
+    this.last = 0;
+    this.pushContext("html", 0);
   }
 
   DOMBuilder.prototype = {
@@ -603,14 +627,53 @@ module.exports = (function(){
       } else {
         attrNode.nodeValue = value;
       }
-      this.currentNode.attributes.push(attrNode);
-      this.currentNode._attributeMap[attrNode.nodeName] = attrNode.nodeValue;
+      try {
+        // IE will error when trying to set input type="text"
+        // See http://reference.sitepoint.com/javascript/Element/setAttributeNode
+        this.currentNode.attributes.setNamedItem(attrNode);
+      } catch (e) {
+      }
     },
     // This method appends a text node to the currently active element.
     text: function(text, parseInfo) {
-      var textNode = this.fragment.createTextNode(text);
-      textNode.parseInfo = parseInfo;
-      this.currentNode.appendChild(textNode);
+        if (this.currentNode && this.currentNode.attributes) {
+          var type = this.currentNode.attributes.type || "";
+          if (type.toLowerCase) {
+              type = type.toLowerCase();
+          } else if (type.nodeValue) { // button type="submit"
+              type = type.nodeValue;
+          }
+          if (this.currentNode.nodeName.toLowerCase() === "script" && (!type || type === "text/javascript")) {
+            this.javascript(text, parseInfo);
+            // Don't actually add javascript to the DOM we're building
+            // because it will execute and we don't want that.
+            return;
+          } else if (this.currentNode.nodeName.toLowerCase() === "style") {
+            this.rules.push.apply(this.rules, parseInfo.rules);
+          }
+        }
+        var textNode = this.fragment.createTextNode(text);
+        textNode.parseInfo = parseInfo;
+        this.currentNode.appendChild(textNode);
+    },
+    javascript: function(text, parseInfo) {
+      try {
+        text = this.scriptPreprocessor(text);
+      } catch(err) {
+        // This is meant to handle esprima errors
+        if (err.index && err.description && err.message) {
+          var cursor = this.currentNode.parseInfo.openTag.end + err.index;
+          throw {parseInfo: {type: "JAVASCRIPT_ERROR", message: err.description, cursor: cursor} };
+        } else {
+          throw err;
+        }
+      }
+      this.code += this.sourceCode.slice(this.last, parseInfo.start);
+      this.code += text;
+      this.last = parseInfo.end;
+    },
+    close: function() {
+      this.code += this.sourceCode.slice(this.last);
     }
   };
 
@@ -733,7 +796,8 @@ module.exports = (function(){
     return false;
   }
 
-  function HTMLParser(stream, domBuilder) {
+  function HTMLParser(stream, domBuilder, options) {
+    this.options = options || {};
     this.warnings = [];
     this.stream = stream;
     this.domBuilder = domBuilder;
@@ -831,8 +895,9 @@ module.exports = (function(){
     // We also keep a list of HTML elements that are now obsolete, but
     // may still be encountered in the wild on popular sites.
     obsoleteHtmlElements: ["acronym", "applet", "basefont", "big", "center",
-                           "dir", "font", "isindex", "listing", "noframes",
-                           "plaintext", "s", "strike", "tt", "xmp"],
+                           "dir", "font", "isindex", "listing", "marquee",
+                           "noframes", "plaintext", "s", "strike", "tt",
+                           "xmp"],
 
     webComponentElements: ["template", "shadow", "content"],
 
@@ -865,6 +930,12 @@ module.exports = (function(){
     },
 
     // This is a helper function to determine whether a given string
+    // is an obsolete HTML element tag
+    _knownObsoleteHTMLElement: function(tagName) {
+      return this.obsoleteHtmlElements.indexOf(tagName) > -1;
+    },
+
+    // This is a helper function to determine whether a given string
     // is a HTML element tag which can optional omit its close tag.
     _knownOmittableCloseTagHtmlElement: function(tagName) {
       return this.omittableCloseTagHtmlElements.indexOf(tagName) > -1;
@@ -894,13 +965,16 @@ module.exports = (function(){
       // First we check to see if the beginning of our stream is
       // an HTML5 doctype tag. We're currently quite strict and don't
       // parse XHTML or other doctypes.
-      if (this.stream.match(this.html5Doctype, true, true))
+      if (this.stream.match(this.html5Doctype, true, true)) {
         this.domBuilder.fragment.node.parseInfo = {
           doctype: {
             start: 0,
             end: this.stream.pos
           }
         };
+      } else {
+        this.warnings.push(new ParseError("NO_DOCTYPE_FOUND"));
+      }
       // Next, we parse "tag soup", creating text nodes and diving into
       // tags as we find them.
       while (!this.stream.end()) {
@@ -917,6 +991,11 @@ module.exports = (function(){
       // we test for that.
       if (this.domBuilder.currentNode != this.domBuilder.fragment.node)
         throw new ParseError("UNCLOSED_TAG", this);
+
+        if (this.domBuilder.currentNode.children &&
+           (this.domBuilder.currentNode.children.length !== 1 || this.domBuilder.currentNode.firstElementChild.tagName !== "HTML")) {
+            this.warnings.push(new ParseError("HTML_NOT_ROOT_ELEMENT", this));
+        }
 
       return {
         warnings: (this.warnings.length > 0 ? this.warnings : false)
@@ -982,14 +1061,23 @@ module.exports = (function(){
         if (tagName) {
           var badSVG = this.parsingSVG && !this._knownSVGElement(tagName);
           var badHTML = !this.parsingSVG && !this._knownHTMLElement(tagName) && !this._isCustomElement(tagName);
+          var obsoleteHTML = this._knownObsoleteHTMLElement(tagName);
           if (badSVG || badHTML) {
             throw new ParseError("INVALID_TAG_NAME", tagName, token);
+          } else if (obsoleteHTML) {
+            this.warnings.push(new ParseError("OBSOLETE_HTML_TAG", tagName, token));
+          } else if (this.options.noScript && tagName === "script") {
+            throw new ParseError("SCRIPT_ELEMENT_NOT_ALLOWED", tagName, token);
+          } else if (this.options.disableTags) {
+            for (var i = 0; i < this.options.disableTags.length; i++) {
+              if (tagName === this.options.disableTags[i]) {
+                throw new ParseError("ELEMENT_NOT_ALLOWED", tagName, token);
+              }
+            }
           }
-        }
-        else {
+        } else {
           throw new ParseError("INVALID_TAG_NAME", tagName, token);
         }
-
         var parseInfo = { openTag: { start: token.interval.start }};
         var nameSpace = (this.parsingSVG ? this.svgNameSpace : undefined);
 
@@ -1037,7 +1125,7 @@ module.exports = (function(){
 
       this.stream.makeToken();
       while (!this.stream.end()) {
-        if (this.stream.match(matchString, true)) {
+        if (this.stream.match(matchString, true, true)) {
           token = this.stream.makeToken();
           text = token.value.slice(0, -matchString.length);
           closeTagInterval = {
@@ -1206,6 +1294,10 @@ module.exports = (function(){
           }
         }
 
+        if (this.options.noScript && /^on/i.test(nameTok.value)) {
+            throw new ParseError("EVENT_HANDLER_ATTR_NOT_ALLOWED", this,
+                nameTok);
+        }
 
         // Currently, we only support quoted attribute values, even
         // though the HTML5 standard allows them to sometimes go unquoted.
@@ -1225,14 +1317,42 @@ module.exports = (function(){
         }
         var valueTok = this.stream.makeToken();
 
-        //Add a new validator to check if there is a http link in a https page
+        // Add a new validator to check if there is a http link in a https page
         if (checkMixedContent && valueTok.value.match(/http:/) && isActiveContent(tagName, nameTok.value)) {
           this.warnings.push(
             new ParseError("HTTP_LINK_FROM_HTTPS_PAGE", this, nameTok, valueTok)
           );
         }
 
+        // Add a new validator to check if there is invalid link content
+        // Cheers to Diego Perini: https://gist.github.com/dperini/729294, modified to include protocol-relative links
+        var regexp = /^(?:((?:https?|ftp):\/\/)|\/\/)(?:\S+(?::\S*)?@)?(?:(?!(?:10|127)(?:\.\d{1,3}){3})(?!(?:169\.254|192\.168)(?:\.\d{1,3}){2})(?!172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2})(?:[1-9]\d?|1\d\d|2[01]\d|22[0-3])(?:\.(?:1?\d{1,2}|2[0-4]\d|25[0-5])){2}(?:\.(?:[1-9]\d?|1\d\d|2[0-4]\d|25[0-4]))|(?:(?:[a-z\u00a1-\uffff0-9]-*)*[a-z\u00a1-\uffff0-9]+)(?:\.(?:[a-z\u00a1-\uffff0-9]-*)*[a-z\u00a1-\uffff0-9]+)*(?:\.(?:[a-z\u00a1-\uffff]{2,}))\.?)(?::\d{2,5})?(?:[/?#]\S*)?$/i;
+
+        // Remove quotes from string literal
+        var url = valueTok.value.substring(1, valueTok.value.length-1);
+        if (!url.match(regexp)) {
+          if (nameTok.value === "src"){
+            this.warnings.push(
+              new ParseError("INVALID_URL", this, nameTok, valueTok)
+            );
+          } else if (nameTok.value === "href") {
+            if (url.charAt(0) !== "#" &&
+                url.substring(0, 10) !== "javascript" &&
+                url.substring(0, 7) !== "mailto:") {
+              this.warnings.push(
+                new ParseError("INVALID_URL", this, nameTok, valueTok)
+              );
+            }
+          }
+        }
+
         var unquotedValue = replaceEntityRefs(valueTok.value.slice(1, -1));
+
+        if (this.options.noScript && /^javascript:/i.test(unquotedValue)) {
+            throw new ParseError("JAVASCRIPT_URL_NOT_ALLOWED", this, nameTok,
+                valueTok);
+        }
+
         this.domBuilder.attribute(nameTok.value, unquotedValue, {
           name: nameTok.interval,
           value: valueTok.interval
@@ -1251,7 +1371,7 @@ module.exports = (function(){
   return HTMLParser;
 }());
 
-},{"./CSSParser":1,"./ParseError":6,"./checkMixedContent":9,"./voidHtmlElements":10}],5:[function(require,module,exports){
+},{"./CSSParser":1,"./ParseError":6,"./checkMixedContent":9,"./voidHtmlElements":11}],5:[function(require,module,exports){
   // ### DOM Node Shim
   //
   // This represents a superficial form of a DOM node which contains most of
@@ -1372,7 +1492,7 @@ module.exports = (function(){
   return Node;
 }());
 
-},{"./voidHtmlElements":10}],6:[function(require,module,exports){
+},{"./voidHtmlElements":11}],6:[function(require,module,exports){
 // ### Errors
 //
 // `ParseError` is an internal error class used to indicate a parsing error.
@@ -1440,6 +1560,17 @@ module.exports = (function() {
       return obj;
     },
     // These are HTML errors.
+    NO_DOCTYPE_FOUND: function() {},
+    HTML_NOT_ROOT_ELEMENT: function(parser) {
+      var currentNode = parser.domBuilder.currentNode.firstElementChild,
+          openTag = this._combine({
+            name: currentNode.nodeName.toLowerCase()
+          }, currentNode.parseInfo.openTag);
+      return {
+        openTag: openTag,
+        cursor: openTag.start
+      };
+    },
     UNCLOSED_TAG: function(parser) {
       var currentNode = parser.domBuilder.currentNode,
           openTag = this._combine({
@@ -1451,6 +1582,33 @@ module.exports = (function() {
       };
     },
     INVALID_TAG_NAME: function(tagName, token) {
+      var openTag = this._combine({
+            name: tagName
+          }, token.interval);
+      return {
+        openTag: openTag,
+        cursor: openTag.start
+      };
+    },
+    SCRIPT_ELEMENT_NOT_ALLOWED: function(tagName, token) {
+      var openTag = this._combine({
+            name: tagName
+          }, token.interval);
+      return {
+        openTag: openTag,
+        cursor: openTag.start
+      };
+    },
+    OBSOLETE_HTML_TAG: function(tagName, token) {
+      var openTag = this._combine({
+          name: tagName
+        }, token.interval);
+      return {
+        openTag: openTag,
+        cursor: openTag.start
+      }
+    },
+    ELEMENT_NOT_ALLOWED: function(tagName, token) {
       var openTag = this._combine({
             name: tagName
           }, token.interval);
@@ -1557,6 +1715,40 @@ module.exports = (function() {
         cursor: attrToken.interval.start
       };
     },
+    EVENT_HANDLER_ATTR_NOT_ALLOWED: function(parser, attrToken) {
+      return {
+        start: attrToken.interval.start,
+        end: attrToken.interval.end,
+        attribute: {
+          name: {
+            value: attrToken.value
+          }
+        },
+        cursor: attrToken.interval.start
+      };
+    },
+    JAVASCRIPT_URL_NOT_ALLOWED: function(parser, nameTok, valueTok) {
+      var currentNode = parser.domBuilder.currentNode,
+          openTag = this._combine({
+            name: currentNode.nodeName.toLowerCase()
+          }, currentNode.parseInfo.openTag),
+          attribute = {
+            name: {
+              value: nameTok.value,
+              start: nameTok.interval.start,
+              end: nameTok.interval.end
+            },
+            value: {
+              start: valueTok.interval.start + 1,
+              end: valueTok.interval.end - 1
+            }
+          };
+      return {
+        openTag: openTag,
+        attribute: attribute,
+        cursor: attribute.value.start
+      };
+    },
     MULTIPLE_ATTR_NAMESPACES: function(parser, attrToken) {
       return {
         start: attrToken.interval.start,
@@ -1649,6 +1841,29 @@ module.exports = (function() {
         cursor: attribute.value.start
       };
     },
+    //Special error type for urls that start with www
+    INVALID_URL: function(parser, nameTok, valueTok) {
+      var currentNode = parser.domBuilder.currentNode,
+          openTag = this._combine({
+            name: currentNode.nodeName.toLowerCase()
+          }, currentNode.parseInfo.openTag),
+          attribute = {
+            name: {
+              value: nameTok.value,
+              start: nameTok.interval.start,
+              end: nameTok.interval.end
+            },
+            value: {
+              start: valueTok.interval.start + 1,
+              end: valueTok.interval.end - 1
+            }
+          };
+      return {
+        openTag: openTag,
+        attribute: attribute,
+        cursor: attribute.value.start
+      };
+    },
     // These are CSS errors.
     UNKOWN_CSS_KEYWORD: function(parser, start, end, value) {
       return {
@@ -1689,6 +1904,16 @@ module.exports = (function() {
         cursor: start
       };
     },
+    UNKNOWN_CSS_PROPERTY_NAME: function(parser, start, end, property) {
+      return {
+        cssProperty: {
+          start: start,
+          end: end,
+          property: property
+        },
+        cursor: start
+      };
+    },
     INVALID_CSS_PROPERTY_NAME: function(parser, start, end, property) {
       return {
         cssProperty: {
@@ -1710,6 +1935,16 @@ module.exports = (function() {
       };
     },
     UNFINISHED_CSS_PROPERTY: function(parser, start, end, property) {
+      return {
+        cssValue: {
+          start: start,
+          end: end,
+          value: value
+        },
+        cursor: start
+      };
+    },
+    IMPROPER_CSS_VALUE: function(parser, start, end, value) {
       return {
         cssProperty: {
           start: start,
@@ -1999,12 +2234,10 @@ module.exports = {
 };
 
 },{}],10:[function(require,module,exports){
-// A list of void HTML elements
-module.exports = ["area", "base", "br", "col", "command", "embed", "hr",
-                  "img", "input", "keygen", "link", "meta", "param",
-                  "source", "track", "wbr"];
+// This is a version of slowparse modified for KA. It is based off this file:
+// https://github.com/mozilla/slowparse/blob/9fa58b78125e9390d83d2660cbcd4994fb9dae96/slowparse.js
+// If you want to know the KA-specific changes, I recommend you run a diff.
 
-},{}],11:[function(require,module,exports){
 // Slowparse is a token stream parser for HTML and CSS text,
 // recording regions of interest during the parse run and
 // signaling any errors detected accompanied by relevant
@@ -2065,7 +2298,8 @@ module.exports = ["area", "base", "br", "col", "command", "embed", "hr",
 
     return {
       document: domBuilder.fragment.node,
-      contexts: domBuilder.contexts,
+      code: domBuilder.code,
+      rules: domBuilder.rules,
       warnings: warnings,
       error: error
     };
@@ -2114,9 +2348,10 @@ module.exports = ["area", "base", "br", "col", "command", "embed", "hr",
 
       var stream = new Stream(html),
           disallowActiveAttributes = (typeof options.disallowActiveAttributes === "undefined") ? false : options.disallowActiveAttributes,
-          domBuilder = new DOMBuilder(disallowActiveAttributes),
-          parser = new HTMLParser(stream, domBuilder),
-          errorDetectors = options.errorDetectors || [];
+          errorDetectors = options.errorDetectors || [],
+          scriptPreprocessor = options.scriptPreprocessor || function(x) {return x;},
+          domBuilder = new DOMBuilder(html, disallowActiveAttributes, scriptPreprocessor),
+          parser = new HTMLParser(stream, domBuilder, options);
 
       return performParseRun(parser, domBuilder, errorDetectors, html);
     },
@@ -2160,5 +2395,11 @@ module.exports = ["area", "base", "br", "col", "command", "embed", "hr",
   }
 }());
 
-},{"./CSSParser":1,"./DOMBuilder":2,"./HTMLParser":4,"./Stream":8}]},{},[11])(11)
+},{"./CSSParser":1,"./DOMBuilder":2,"./HTMLParser":4,"./Stream":8}],11:[function(require,module,exports){
+// A list of void HTML elements
+module.exports = ["area", "base", "br", "col", "command", "embed", "hr",
+                  "img", "input", "keygen", "link", "meta", "param",
+                  "source", "track", "wbr"];
+
+},{}]},{},[10])(10)
 });

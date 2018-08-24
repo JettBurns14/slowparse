@@ -23,6 +23,17 @@ module.exports = (function() {
       return obj;
     },
     // These are HTML errors.
+    NO_DOCTYPE_FOUND: function() {},
+    HTML_NOT_ROOT_ELEMENT: function(parser) {
+      var currentNode = parser.domBuilder.currentNode.firstElementChild,
+          openTag = this._combine({
+            name: currentNode.nodeName.toLowerCase()
+          }, currentNode.parseInfo.openTag);
+      return {
+        openTag: openTag,
+        cursor: openTag.start
+      };
+    },
     UNCLOSED_TAG: function(parser) {
       var currentNode = parser.domBuilder.currentNode,
           openTag = this._combine({
@@ -34,6 +45,33 @@ module.exports = (function() {
       };
     },
     INVALID_TAG_NAME: function(tagName, token) {
+      var openTag = this._combine({
+            name: tagName
+          }, token.interval);
+      return {
+        openTag: openTag,
+        cursor: openTag.start
+      };
+    },
+    SCRIPT_ELEMENT_NOT_ALLOWED: function(tagName, token) {
+      var openTag = this._combine({
+            name: tagName
+          }, token.interval);
+      return {
+        openTag: openTag,
+        cursor: openTag.start
+      };
+    },
+    OBSOLETE_HTML_TAG: function(tagName, token) {
+      var openTag = this._combine({
+          name: tagName
+        }, token.interval);
+      return {
+        openTag: openTag,
+        cursor: openTag.start
+      }
+    },
+    ELEMENT_NOT_ALLOWED: function(tagName, token) {
       var openTag = this._combine({
             name: tagName
           }, token.interval);
@@ -140,6 +178,40 @@ module.exports = (function() {
         cursor: attrToken.interval.start
       };
     },
+    EVENT_HANDLER_ATTR_NOT_ALLOWED: function(parser, attrToken) {
+      return {
+        start: attrToken.interval.start,
+        end: attrToken.interval.end,
+        attribute: {
+          name: {
+            value: attrToken.value
+          }
+        },
+        cursor: attrToken.interval.start
+      };
+    },
+    JAVASCRIPT_URL_NOT_ALLOWED: function(parser, nameTok, valueTok) {
+      var currentNode = parser.domBuilder.currentNode,
+          openTag = this._combine({
+            name: currentNode.nodeName.toLowerCase()
+          }, currentNode.parseInfo.openTag),
+          attribute = {
+            name: {
+              value: nameTok.value,
+              start: nameTok.interval.start,
+              end: nameTok.interval.end
+            },
+            value: {
+              start: valueTok.interval.start + 1,
+              end: valueTok.interval.end - 1
+            }
+          };
+      return {
+        openTag: openTag,
+        attribute: attribute,
+        cursor: attribute.value.start
+      };
+    },
     MULTIPLE_ATTR_NAMESPACES: function(parser, attrToken) {
       return {
         start: attrToken.interval.start,
@@ -232,6 +304,29 @@ module.exports = (function() {
         cursor: attribute.value.start
       };
     },
+    //Special error type for urls that start with www
+    INVALID_URL: function(parser, nameTok, valueTok) {
+      var currentNode = parser.domBuilder.currentNode,
+          openTag = this._combine({
+            name: currentNode.nodeName.toLowerCase()
+          }, currentNode.parseInfo.openTag),
+          attribute = {
+            name: {
+              value: nameTok.value,
+              start: nameTok.interval.start,
+              end: nameTok.interval.end
+            },
+            value: {
+              start: valueTok.interval.start + 1,
+              end: valueTok.interval.end - 1
+            }
+          };
+      return {
+        openTag: openTag,
+        attribute: attribute,
+        cursor: attribute.value.start
+      };
+    },
     // These are CSS errors.
     UNKOWN_CSS_KEYWORD: function(parser, start, end, value) {
       return {
@@ -272,6 +367,16 @@ module.exports = (function() {
         cursor: start
       };
     },
+    UNKNOWN_CSS_PROPERTY_NAME: function(parser, start, end, property) {
+      return {
+        cssProperty: {
+          start: start,
+          end: end,
+          property: property
+        },
+        cursor: start
+      };
+    },
     INVALID_CSS_PROPERTY_NAME: function(parser, start, end, property) {
       return {
         cssProperty: {
@@ -293,6 +398,16 @@ module.exports = (function() {
       };
     },
     UNFINISHED_CSS_PROPERTY: function(parser, start, end, property) {
+      return {
+        cssValue: {
+          start: start,
+          end: end,
+          value: value
+        },
+        cursor: start
+      };
+    },
+    IMPROPER_CSS_VALUE: function(parser, start, end, value) {
       return {
         cssProperty: {
           start: start,

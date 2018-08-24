@@ -75,7 +75,8 @@ module.exports = (function(){
     return false;
   }
 
-  function HTMLParser(stream, domBuilder) {
+  function HTMLParser(stream, domBuilder, options) {
+    this.options = options || {};
     this.warnings = [];
     this.stream = stream;
     this.domBuilder = domBuilder;
@@ -173,8 +174,9 @@ module.exports = (function(){
     // We also keep a list of HTML elements that are now obsolete, but
     // may still be encountered in the wild on popular sites.
     obsoleteHtmlElements: ["acronym", "applet", "basefont", "big", "center",
-                           "dir", "font", "isindex", "listing", "noframes",
-                           "plaintext", "s", "strike", "tt", "xmp"],
+                           "dir", "font", "isindex", "listing", "marquee",
+                           "noframes", "plaintext", "s", "strike", "tt",
+                           "xmp"],
 
     webComponentElements: ["template", "shadow", "content"],
 
@@ -207,6 +209,12 @@ module.exports = (function(){
     },
 
     // This is a helper function to determine whether a given string
+    // is an obsolete HTML element tag
+    _knownObsoleteHTMLElement: function(tagName) {
+      return this.obsoleteHtmlElements.indexOf(tagName) > -1;
+    },
+
+    // This is a helper function to determine whether a given string
     // is a HTML element tag which can optional omit its close tag.
     _knownOmittableCloseTagHtmlElement: function(tagName) {
       return this.omittableCloseTagHtmlElements.indexOf(tagName) > -1;
@@ -236,13 +244,16 @@ module.exports = (function(){
       // First we check to see if the beginning of our stream is
       // an HTML5 doctype tag. We're currently quite strict and don't
       // parse XHTML or other doctypes.
-      if (this.stream.match(this.html5Doctype, true, true))
+      if (this.stream.match(this.html5Doctype, true, true)) {
         this.domBuilder.fragment.node.parseInfo = {
           doctype: {
             start: 0,
             end: this.stream.pos
           }
         };
+      } else {
+        this.warnings.push(new ParseError("NO_DOCTYPE_FOUND"));
+      }
       // Next, we parse "tag soup", creating text nodes and diving into
       // tags as we find them.
       while (!this.stream.end()) {
@@ -259,6 +270,11 @@ module.exports = (function(){
       // we test for that.
       if (this.domBuilder.currentNode != this.domBuilder.fragment.node)
         throw new ParseError("UNCLOSED_TAG", this);
+
+        if (this.domBuilder.currentNode.children &&
+           (this.domBuilder.currentNode.children.length !== 1 || this.domBuilder.currentNode.firstElementChild.tagName !== "HTML")) {
+            this.warnings.push(new ParseError("HTML_NOT_ROOT_ELEMENT", this));
+        }
 
       return {
         warnings: (this.warnings.length > 0 ? this.warnings : false)
@@ -324,14 +340,23 @@ module.exports = (function(){
         if (tagName) {
           var badSVG = this.parsingSVG && !this._knownSVGElement(tagName);
           var badHTML = !this.parsingSVG && !this._knownHTMLElement(tagName) && !this._isCustomElement(tagName);
+          var obsoleteHTML = this._knownObsoleteHTMLElement(tagName);
           if (badSVG || badHTML) {
             throw new ParseError("INVALID_TAG_NAME", tagName, token);
+          } else if (obsoleteHTML) {
+            this.warnings.push(new ParseError("OBSOLETE_HTML_TAG", tagName, token));
+          } else if (this.options.noScript && tagName === "script") {
+            throw new ParseError("SCRIPT_ELEMENT_NOT_ALLOWED", tagName, token);
+          } else if (this.options.disableTags) {
+            for (var i = 0; i < this.options.disableTags.length; i++) {
+              if (tagName === this.options.disableTags[i]) {
+                throw new ParseError("ELEMENT_NOT_ALLOWED", tagName, token);
+              }
+            }
           }
-        }
-        else {
+        } else {
           throw new ParseError("INVALID_TAG_NAME", tagName, token);
         }
-
         var parseInfo = { openTag: { start: token.interval.start }};
         var nameSpace = (this.parsingSVG ? this.svgNameSpace : undefined);
 
@@ -379,7 +404,7 @@ module.exports = (function(){
 
       this.stream.makeToken();
       while (!this.stream.end()) {
-        if (this.stream.match(matchString, true)) {
+        if (this.stream.match(matchString, true, true)) {
           token = this.stream.makeToken();
           text = token.value.slice(0, -matchString.length);
           closeTagInterval = {
@@ -548,6 +573,10 @@ module.exports = (function(){
           }
         }
 
+        if (this.options.noScript && /^on/i.test(nameTok.value)) {
+            throw new ParseError("EVENT_HANDLER_ATTR_NOT_ALLOWED", this,
+                nameTok);
+        }
 
         // Currently, we only support quoted attribute values, even
         // though the HTML5 standard allows them to sometimes go unquoted.
@@ -567,14 +596,42 @@ module.exports = (function(){
         }
         var valueTok = this.stream.makeToken();
 
-        //Add a new validator to check if there is a http link in a https page
+        // Add a new validator to check if there is a http link in a https page
         if (checkMixedContent && valueTok.value.match(/http:/) && isActiveContent(tagName, nameTok.value)) {
           this.warnings.push(
             new ParseError("HTTP_LINK_FROM_HTTPS_PAGE", this, nameTok, valueTok)
           );
         }
 
+        // Add a new validator to check if there is invalid link content
+        // Cheers to Diego Perini: https://gist.github.com/dperini/729294, modified to include protocol-relative links
+        var regexp = /^(?:((?:https?|ftp):\/\/)|\/\/)(?:\S+(?::\S*)?@)?(?:(?!(?:10|127)(?:\.\d{1,3}){3})(?!(?:169\.254|192\.168)(?:\.\d{1,3}){2})(?!172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2})(?:[1-9]\d?|1\d\d|2[01]\d|22[0-3])(?:\.(?:1?\d{1,2}|2[0-4]\d|25[0-5])){2}(?:\.(?:[1-9]\d?|1\d\d|2[0-4]\d|25[0-4]))|(?:(?:[a-z\u00a1-\uffff0-9]-*)*[a-z\u00a1-\uffff0-9]+)(?:\.(?:[a-z\u00a1-\uffff0-9]-*)*[a-z\u00a1-\uffff0-9]+)*(?:\.(?:[a-z\u00a1-\uffff]{2,}))\.?)(?::\d{2,5})?(?:[/?#]\S*)?$/i;
+
+        // Remove quotes from string literal
+        var url = valueTok.value.substring(1, valueTok.value.length-1);
+        if (!url.match(regexp)) {
+          if (nameTok.value === "src"){
+            this.warnings.push(
+              new ParseError("INVALID_URL", this, nameTok, valueTok)
+            );
+          } else if (nameTok.value === "href") {
+            if (url.charAt(0) !== "#" &&
+                url.substring(0, 10) !== "javascript" &&
+                url.substring(0, 7) !== "mailto:") {
+              this.warnings.push(
+                new ParseError("INVALID_URL", this, nameTok, valueTok)
+              );
+            }
+          }
+        }
+
         var unquotedValue = replaceEntityRefs(valueTok.value.slice(1, -1));
+
+        if (this.options.noScript && /^javascript:/i.test(unquotedValue)) {
+            throw new ParseError("JAVASCRIPT_URL_NOT_ALLOWED", this, nameTok,
+                valueTok);
+        }
+
         this.domBuilder.attribute(nameTok.value, unquotedValue, {
           name: nameTok.interval,
           value: valueTok.interval

@@ -12,11 +12,17 @@ module.exports = (function(){
 
   var DocumentFragment = require("./DocumentFragment");
 
-  function DOMBuilder(disallowActiveAttributes) {
+  function DOMBuilder(sourceCode, disallowActiveAttributes, scriptPreprocessor) {
+    this.disallowActiveAttributes = disallowActiveAttributes;
+    this.scriptPreprocessor = scriptPreprocessor;
+    this.sourceCode = sourceCode;
+    this.code = "";
     this.fragment = new DocumentFragment();
     this.currentNode = this.fragment.node;
     this.contexts = [];
-    this.disallowActiveAttributes = disallowActiveAttributes;
+    this.rules = [];
+    this.last = 0;
+    this.pushContext("html", 0);
   }
 
   DOMBuilder.prototype = {
@@ -59,14 +65,53 @@ module.exports = (function(){
       } else {
         attrNode.nodeValue = value;
       }
-      this.currentNode.attributes.push(attrNode);
-      this.currentNode._attributeMap[attrNode.nodeName] = attrNode.nodeValue;
+      try {
+        // IE will error when trying to set input type="text"
+        // See http://reference.sitepoint.com/javascript/Element/setAttributeNode
+        this.currentNode.attributes.setNamedItem(attrNode);
+      } catch (e) {
+      }
     },
     // This method appends a text node to the currently active element.
     text: function(text, parseInfo) {
-      var textNode = this.fragment.createTextNode(text);
-      textNode.parseInfo = parseInfo;
-      this.currentNode.appendChild(textNode);
+        if (this.currentNode && this.currentNode.attributes) {
+          var type = this.currentNode.attributes.type || "";
+          if (type.toLowerCase) {
+              type = type.toLowerCase();
+          } else if (type.nodeValue) { // button type="submit"
+              type = type.nodeValue;
+          }
+          if (this.currentNode.nodeName.toLowerCase() === "script" && (!type || type === "text/javascript")) {
+            this.javascript(text, parseInfo);
+            // Don't actually add javascript to the DOM we're building
+            // because it will execute and we don't want that.
+            return;
+          } else if (this.currentNode.nodeName.toLowerCase() === "style") {
+            this.rules.push.apply(this.rules, parseInfo.rules);
+          }
+        }
+        var textNode = this.fragment.createTextNode(text);
+        textNode.parseInfo = parseInfo;
+        this.currentNode.appendChild(textNode);
+    },
+    javascript: function(text, parseInfo) {
+      try {
+        text = this.scriptPreprocessor(text);
+      } catch(err) {
+        // This is meant to handle esprima errors
+        if (err.index && err.description && err.message) {
+          var cursor = this.currentNode.parseInfo.openTag.end + err.index;
+          throw {parseInfo: {type: "JAVASCRIPT_ERROR", message: err.description, cursor: cursor} };
+        } else {
+          throw err;
+        }
+      }
+      this.code += this.sourceCode.slice(this.last, parseInfo.start);
+      this.code += text;
+      this.last = parseInfo.end;
+    },
+    close: function() {
+      this.code += this.sourceCode.slice(this.last);
     }
   };
 

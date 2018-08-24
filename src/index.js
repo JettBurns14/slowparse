@@ -1,3 +1,7 @@
+// This is a version of slowparse modified for KA. It is based off this file:
+// https://github.com/mozilla/slowparse/blob/9fa58b78125e9390d83d2660cbcd4994fb9dae96/slowparse.js
+// If you want to know the KA-specific changes, I recommend you run a diff.
+
 // Slowparse is a token stream parser for HTML and CSS text,
 // recording regions of interest during the parse run and
 // signaling any errors detected accompanied by relevant
@@ -58,7 +62,8 @@
 
     return {
       document: domBuilder.fragment.node,
-      contexts: domBuilder.contexts,
+      code: domBuilder.code,
+      rules: domBuilder.rules,
       warnings: warnings,
       error: error
     };
@@ -107,9 +112,10 @@
 
       var stream = new Stream(html),
           disallowActiveAttributes = (typeof options.disallowActiveAttributes === "undefined") ? false : options.disallowActiveAttributes,
-          domBuilder = new DOMBuilder(disallowActiveAttributes),
-          parser = new HTMLParser(stream, domBuilder),
-          errorDetectors = options.errorDetectors || [];
+          errorDetectors = options.errorDetectors || [],
+          scriptPreprocessor = options.scriptPreprocessor || function(x) {return x;},
+          domBuilder = new DOMBuilder(html, disallowActiveAttributes, scriptPreprocessor),
+          parser = new HTMLParser(stream, domBuilder, options);
 
       return performParseRun(parser, domBuilder, errorDetectors, html);
     },
