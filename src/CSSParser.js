@@ -88,6 +88,7 @@ module.exports = (function(){
       "text-wrap","top","transform","transform-origin","transform-style",
       "transition","transition-delay","transition-duration",
       "transition-property","transition-timing-function","unicode-bidi",
+      "user-select",
       "vertical-align","visibility","voice-balance","voice-duration",
       "voice-family","voice-pitch","voice-pitch-range","voice-rate",
       "voice-stress","voice-volume","volume","white-space","widows","width",
@@ -444,8 +445,13 @@ module.exports = (function(){
       if (next === ':') {
         // Before we continue, we must make sure the string we found is a real
         // CSS property.
-        if (!( property && property.match(/^[a-z\-]+$/)) || !this._knownCSSProperty(property)) {
-          throw new ParseError("INVALID_CSS_PROPERTY_NAME", this, propertyStart, propertyEnd, property);
+        var isValidName = property && property.match(/^[a-z\-]+$/);
+        if (!isValidName) {
+          throw new ParseError("INVALID_CSS_PROPERTY_NAME",
+              this, propertyStart, propertyEnd, property);
+        } else if (!this._knownCSSProperty(property)) {
+          this.warnings.push(new ParseError("UNKNOWN_CSS_PROPERTY_NAME",
+              this, propertyStart, propertyEnd, property));
         }
         this.stream.markTokenStartAfterSpace();
         this._parseValue(selector, selectorStart, property, propertyStart);
@@ -488,6 +494,17 @@ module.exports = (function(){
         throw new ParseError("MISSING_CSS_VALUE", this, this.stream.pos-1, this.stream.pos);
       }
 
+      // If value has a newline, the tokenizer ate the next pair, so we're missing a ;
+      if (value.indexOf('\n') > -1) {
+        value = value.substr(0, value.indexOf('\n'));
+        this.warnings.push(new ParseError("UNFINISHED_CSS_VALUE", this, valueStart, valueEnd, value));
+      }
+
+      // if value matches this regex, then there's a space between
+      if (value.match(/(#|rgb|rgba|hsl|hsla)\s+\(/)) {
+        this.warnings.push(new ParseError("IMPROPER_CSS_VALUE", this, valueStart, valueEnd, value));
+      }
+
       // At this point we can fill in the *value* part of the current
       // `property: value;` pair. However, we hold off binding it until
       // we are sure there are no parse errors.
@@ -519,6 +536,7 @@ module.exports = (function(){
       }
       else if (next === '}') {
         // This is block level termination; try to read a new selector.
+        this.warnings.push(new ParseError("UNFINISHED_CSS_VALUE", this, valueStart, valueEnd, value));
         this.currentRule.declarations.end = this.stream.pos;
         this._bindCurrentRule();
         this.stream.markTokenStartAfterSpace();
